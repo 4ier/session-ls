@@ -2,7 +2,7 @@
 """Parser checks for session-ls: run `pytest tests/` or `python3 -m pytest`."""
 import json, os, sys, tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import session_ls as s
 
 s.CACHE = os.path.join(tempfile.mkdtemp(), "cache.json")  # don't touch real cache
