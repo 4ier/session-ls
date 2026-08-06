@@ -85,6 +85,8 @@ def _claude(f, head):
 def _cursor(f, head):
     # ~/.cursor/projects/<cwd-dir>/agent-transcripts/<id>/<id>.jsonl
     name = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(f))))
+    if not name:
+        return "", None  # path too shallow (e.g. a fixture); cwd unknown
     # ponytail: '-'->'/' decode is best-effort; dirs with '-' in a segment
     # decode wrong. Only affects cwd display, harmless for search.
     cwd = "/" + name.replace("-", "/") if not name[0].isdigit() else name
