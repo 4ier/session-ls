@@ -180,6 +180,58 @@ def test_cursor_collect_skips_subagents():
     assert paths[0].endswith("main.jsonl")
 
 
+def test_parser_edge_branches():
+    d = _write({
+        # first line is not a session/session_meta line -> meta returns None -> skipped
+        "pi-not-session.jsonl": [json.dumps({"type": "message", "message": {"role": "user",
+            "content": [{"type": "text", "text": "orphan"}]}})],
+        "codex-not-meta.jsonl": [json.dumps({"type": "response_item", "payload": {"type": "message",
+            "role": "user", "content": [{"type": "input_text", "text": "orphan"}]}})],
+        # claude user line with a LIST content (string content was already covered)
+        "claude-list.jsonl": [json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/tmp/l", "message": {"role": "user",
+            "content": [{"type": "text", "text": "list content"},
+                         {"type": "tool_use", "id": "x"}]}})],
+        # cursor: non-user line first, then a real user line
+        "cursor-mixed.jsonl": [
+            json.dumps({"role": "assistant", "message": {"content": [{"type": "text", "text": "answer"}]}}),
+            json.dumps({"role": "user", "message": {"content": [{"type": "text", "text": "real question"}]}}),
+        ],
+        # claude file with no user line at all -> meta returns None -> skipped
+        "claude-no-user.jsonl": [json.dumps({"type": "assistant", "message": {"role": "assistant",
+            "content": "hi"}})],
+    })
+    rows = s.parse_all([
+        ("pi", s._pi, s._pi_user, os.path.join(d, "pi-not-session.jsonl")),
+        ("codex", s._codex, s._codex_user, os.path.join(d, "codex-not-meta.jsonl")),
+        ("claude", s._claude, s._claude_user, os.path.join(d, "claude-list.jsonl")),
+        ("cursor", s._cursor, s._cursor_user, os.path.join(d, "cursor-mixed.jsonl")),
+        ("claude", s._claude, s._claude_user, os.path.join(d, "claude-no-user.jsonl")),
+    ])
+    assert "pi-not-session" not in [r["file"] for r in rows]     # meta None
+    assert "codex-not-meta" not in [r["file"] for r in rows]     # meta None
+    assert "claude-no-user" not in [r["file"] for r in rows]     # meta None
+    by_file = {r["file"]: r for r in rows}
+    assert by_file[os.path.join(d, "claude-list.jsonl")]["title"] == "list content"
+    assert by_file[os.path.join(d, "cursor-mixed.jsonl")]["title"] == "real question"
+
+    # cursor meta with a too-shallow path (no parent dirs): cwd unknown, still listed
+    assert s._cursor("x.jsonl", []) == ("", None)
+
+
+def test_no_title_within_head_limit():
+    # a file with >= 2000 lines and no user text: the head read exhausts
+    # the line budget without a title, but the row is still listed
+    d = _write({"long.jsonl": [json.dumps({"type": "session", "timestamp": "2026-01-01T00:00:00Z",
+                                            "cwd": "/long"})] + [
+        json.dumps({"type": "message", "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "filler"}]}}) for _ in range(2000)]})
+    rows = s.parse_all([("pi", s._pi, s._pi_user, os.path.join(d, "long.jsonl"))])
+    assert len(rows) == 1, rows
+    assert rows[0]["title"] == ""
+    assert rows[0]["cwd"] == "/long"
+
+
 def test_corrupt_cache_does_not_crash():
     # a cache entry without 'sig' (older/foreign schema) must not raise
     import tempfile

@@ -142,6 +142,18 @@ def test_deleted_file_disappears():
     os.remove(os.path.join(d, "b.jsonl"))
     assert "2 sessions" in _run([], reg)
 
+
+def test_stat_and_open_failures_skipped():
+    d = _store()
+    # broken symlink: glob matches, os.stat raises -> file skipped
+    os.remove(os.path.join(d, "a.jsonl"))
+    os.symlink(os.path.join(d, "no-such-target.jsonl"), os.path.join(d, "a.jsonl"))
+    # directory named *.jsonl: stat succeeds, open raises -> file skipped
+    os.makedirs(os.path.join(d, "dir.jsonl"))
+    out = _run([], _pi_registry(d))
+    assert "2 sessions" in out  # only b.jsonl and c.jsonl survive
+    assert "a.jsonl" not in out and "dir.jsonl" not in out
+
 if __name__ == "__main__":
     for _n in sorted(n for n in dir() if n.startswith("test_")):
         globals()[_n]()
