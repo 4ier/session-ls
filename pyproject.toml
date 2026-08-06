@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "session-ls"
+version = "0.1.0"
+description = "List and search session history across coding agents (pi, codex, claude, cursor)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["agent", "sessions", "search", "pi", "codex", "claude", "cursor"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Repository = "https://github.com/4ier/session-ls"
+Issues = "https://github.com/4ier/session-ls/issues"
+
+[project.scripts]
+session-ls = "session_ls:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["session_ls"]
+
+[tool.setuptools.data-files]
+"share/man/man1" = ["man/session-ls.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

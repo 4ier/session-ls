@@ -1,0 +1,150 @@
+.TH SESSION-LS 1 "August 2026" "session-ls 0.1.0" "User Commands"
+.SH NAME
+session-ls \- list and search session history across coding agents
+.SH SYNOPSIS
+.B session-ls
+[\fIKEYWORD\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B session-ls
+scans the local session stores of coding agents (pi, codex, claude,
+cursor) and lists every session, newest first.  Each line shows the
+agent, session start time, last activity, the working directory, and
+the first real user message (the session "title").
+
+Given a
+.IR KEYWORD ,
+only sessions whose title contains it (case-insensitive substring
+match) are shown.  With
+.B \-f
+the keyword is instead matched against the full session content.
+
+.B session-ls
+is a plain local command-line tool.  It keeps no index and does no
+semantic processing; matching is literal text comparison.  Session
+files are read directly from the agent stores.  Parsed metadata is
+cached in
+\fI~/.cache/session_ls_cache.json\fR ,
+keyed by file size and modification time, so repeated runs over
+gigabytes of session logs are fast; the cache is rebuilt automatically
+whenever a file changes.
+.SH OPTIONS
+.TP
+.B KEYWORD
+Search term.  Matched case-insensitively against session titles (or,
+with
+.BR \-f ,
+against full session content).  Multiple words must be quoted; they are
+matched as one phrase.
+.TP
+.B \-f, \-\-full
+Search the full session content instead of titles only.  Uses ripgrep
+if available, otherwise plain grep; this can take a few seconds over
+large session stores.
+.TP
+.B \-a, \-\-agent \fIAGENT\fR
+Only show sessions from this agent.  Valid values: pi, codex, claude,
+cursor.
+.TP
+.B \-c, \-\-cwd \fISUBSTRING\fR
+Only show sessions whose working directory contains SUBSTRING.
+.TP
+.B \-\-since \fIDATE\fR
+Only show sessions started on or after DATE (YYYY\-MM\-DD).
+.TP
+.B \-\-until \fIDATE\fR
+Only show sessions last active on or before DATE (YYYY\-MM\-DD).
+.TP
+.B \-n, \-\-limit \fIN\fR
+Show only the N most recently active sessions.
+.TP
+.B \-l, \-\-list
+Print only the session file paths, one per line (useful for piping to
+other commands).
+.TP
+.B \-\-json
+Print matching sessions as JSON Lines, one object per line, with keys:
+agent, cwd, started, last, title, file.
+.TP
+.B \-h, \-\-help
+Show usage and exit.
+.SH EXIT STATUS
+.B session-ls
+returns 0 on success.  No session files found is not an error.
+.SH FILES
+.TP
+.I ~/.pi/agent/sessions/*/*.jsonl
+pi session store, one directory per working directory.
+.TP
+.I ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+codex session store, grouped by date.
+.TP
+.I ~/.codex/archived_sessions/rollout-*.jsonl
+codex archived sessions.
+.TP
+.I ~/.claude/projects/*/*.jsonl
+claude code session store, one directory per project.
+.TP
+.I ~/.cursor/projects/*/agent-transcripts/*/*.jsonl
+cursor agent transcripts (subagent transcripts are ignored).
+.TP
+.I ~/.cache/session_ls_cache.json
+metadata cache.  Safe to delete; it is rebuilt on the next run.
+.SH ENVIRONMENT
+.TP
+.B HOME
+Determines where agent stores and the cache are looked up.
+.SH EXAMPLES
+List the ten most recent sessions:
+.PP
+.RS
+.nf
+session-ls -n 10
+.fi
+.RE
+.PP
+Find sessions whose first user message mentions a LAN (title search):
+.PP
+.RS
+.nf
+session-ls 局域网
+.fi
+.RE
+.PP
+Search the full content of all sessions for a phrase:
+.PP
+.RS
+.nf
+session-ls "immich 2283" -f
+.fi
+.RE
+.PP
+Find pi sessions in a project started this month, as JSON:
+.PP
+.RS
+.nf
+session-ls -a pi -c nemo -f --since 2026-08-01 --json
+.fi
+.RE
+.PP
+List file paths of matching sessions and show their first lines:
+.PP
+.RS
+.nf
+session-ls 局域网 -l | xargs head -1
+.fi
+.RE
+.SH NOTES
+The title of a session is the first real user message.  Sessions whose
+log starts with injected context (for example codex
+<recommended_plugins> or AGENTS.md instructions blocks) skip that
+context and use the first genuine user message instead; if a session
+contains only injected context, the first user message is shown anyway.
+Cursor transcripts carry no timestamps, so their start time equals the
+file modification time.  The cursor working directory is decoded from
+the project directory name (dashes become slashes) and may be imprecise
+for paths containing dashes; this affects display only, never search.
+.SH SEE ALSO
+.BR rg (1),
+.BR grep (1)
+.SH AUTHOR
+fourier
