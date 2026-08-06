@@ -56,7 +56,7 @@ def _cursor_user(line):
         return ""
     t = " ".join(b.get("text", "") for b in d.get("message", {}).get("content", [])
                  if isinstance(b, dict) and b.get("type") == "text").strip()
-    # strip the <timestamp>…</timestamp> / <user_query> wrappers
+    # strip the <timestamp>...</timestamp> / <user_query> wrappers
     return re.sub(r"^<timestamp>.*?</timestamp>\s*", "", t).replace(
         "<user_query>", "").replace("</user_query>", "").strip()
 
@@ -85,7 +85,7 @@ def _claude(f, head):
 def _cursor(f, head):
     # ~/.cursor/projects/<cwd-dir>/agent-transcripts/<id>/<id>.jsonl
     name = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(f))))
-    # ponytail: '-'→'/' decode is best-effort; dirs with '-' in a segment
+    # ponytail: '-'->'/' decode is best-effort; dirs with '-' in a segment
     # decode wrong. Only affects cwd display, harmless for search.
     cwd = "/" + name.replace("-", "/") if not name[0].isdigit() else name
     return cwd, None  # no timestamps in cursor transcripts; use mtime

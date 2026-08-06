@@ -23,7 +23,7 @@ codex `<recommended_plugins>` or `AGENTS.md` instructions is skipped).
   available (fallback: `grep`).
 - **Plain search, no semantics.** No index, no embeddings, no network.
   Matching is literal substring comparison. Decide what's relevant
-  yourself — or hand the file paths to an LLM.
+  yourself - or hand the file paths to an LLM.
 - **Lightweight, zero dependencies.** Pure stdlib, one module.
 - **Extensible.** Adding another agent is one `REGISTRY` entry plus two
   small functions (see below).
@@ -60,11 +60,11 @@ session-ls [KEYWORD] [OPTIONS]
 
 ```bash
 session-ls -n 10                              # ten most recent sessions
-session-ls 局域网                              # title search
+session-ls websocket                              # title search
 session-ls "immich 2283" -f                  # full-content search
 session-ls -a pi -c nemo --since 2026-08-01   # filters combine
-session-ls 局域网 -l | xargs head -1          # inspect raw matches
-session-ls 局域网 --json | jq -r .file        # feed paths to other tools
+session-ls websocket -l | xargs head -1          # inspect raw matches
+session-ls websocket --json | jq -r .file        # feed paths to other tools
 ```
 
 ## Supported agents
