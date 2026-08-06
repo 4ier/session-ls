@@ -18,10 +18,15 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".cache", "session_ls_cache.json")
 
+_INJECTED_PREFIXES = ("<recommended_plugins>", "<environment_details>",
+                      "<system-reminder>", "# AGENTS.md")
+
+
 def _injected(t):
     """True if this user message is injected context, not the user's own text."""
     t = t.lstrip()
-    return t.startswith("<") or "AGENTS.md instructions" in t
+    return t.startswith(_INJECTED_PREFIXES) or "AGENTS.md instructions" in t
+
 
 # ---- user-text extractors: line -> first real user text or '' --------------
 
@@ -29,25 +34,36 @@ def _pi_user(line):
     m = json.loads(line).get("message", {}) or {}
     if m.get("role") != "user":
         return ""
-    t = " ".join(p.get("text", "") for p in m.get("content", [])
-                 if p.get("type") == "text").strip()
+    content = m.get("content")
+    if not isinstance(content, list):
+        return ""
+    t = " ".join(p.get("text", "") for p in content
+                 if isinstance(p, dict) and p.get("type") == "text").strip()
     return t if t and not _injected(t) else ""
 
 def _codex_user(line):
     p = json.loads(line).get("payload", {}) or {}
     if p.get("role") != "user":
         return ""
-    t = " ".join(c.get("text", "") for c in p.get("content", [])
-                 if c.get("type") in ("input_text", "text")).strip()
+    content = p.get("content")
+    if not isinstance(content, list):
+        return ""
+    t = " ".join(c.get("text", "") for c in content
+                 if isinstance(c, dict) and c.get("type") in ("input_text", "text")).strip()
     return t if t and not _injected(t) else ""
 
 def _claude_user(line):
     d = json.loads(line)
     if d.get("type") != "user":
         return ""
-    c = d.get("message", {}).get("content")
-    t = c if isinstance(c, str) else " ".join(
-        b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        t = c
+    elif isinstance(c, list):
+        t = " ".join(b.get("text", "") for b in c
+                     if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        t = ""
     return t.strip()
 
 def _cursor_user(line):
@@ -66,7 +82,7 @@ def _pi(f, head):
     h = json.loads(head[0])
     if h.get("type") != "session":
         return None
-    return h.get("cwd"), h["timestamp"]
+    return h.get("cwd"), h.get("timestamp")
 
 def _codex(f, head):
     h = json.loads(head[0])
@@ -77,7 +93,10 @@ def _codex(f, head):
 
 def _claude(f, head):
     for line in head:
-        d = json.loads(line)
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue  # one bad line must not hide the session
         if d.get("type") == "user":
             return d.get("cwd"), d.get("timestamp")
     return None
@@ -108,10 +127,8 @@ def collect():
     files = []
     for name, pattern, parse, user_text in REGISTRY:
         for f in glob.glob(pattern):
-            if name == "cursor":
-                # keep only the main transcript, skip subagents/
-                if os.path.basename(f)[:-6] != os.path.basename(os.path.dirname(f)):
-                    continue
+            if name == "cursor" and "/subagents/" in f:
+                continue  # keep only main transcripts, skip subagent ones
             files.append((name, parse, user_text, f))
     return files
 
@@ -137,7 +154,7 @@ def parse_all(files):
             st = os.stat(f)
             sig = [st.st_size, st.st_mtime]
             c = cache.get(f)
-            if c and c["sig"] == sig:  # unchanged: reuse cached metadata
+            if c and c.get("sig") == sig:  # unchanged: reuse cached metadata
                 new_cache[f] = c
                 rows.append({k: v for k, v in c.items() if k != "sig"})
                 continue
@@ -151,20 +168,21 @@ def parse_all(files):
                     if not line:
                         break
                     head.append(line)
-                    title = user_text(line)
+                    try:
+                        title = user_text(line)
+                    except Exception:
+                        title = ""  # one malformed line must not hide the session
                     if title:
-                        break  # title found, stop reading
+                        break
         except Exception:
             continue
-        r = parse(f, head) if head else None
+        try:
+            r = parse(f, head) if head else None
+        except Exception:
+            continue
         if not r:
             continue
         cwd, started = r
-        if not title:
-            for line in head[1:]:
-                title = user_text(line)
-                if title:
-                    break
         mtime = datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()
         row = {"agent": name, "cwd": cwd or "", "started": started or mtime,
                "last": mtime, "title": title, "file": f}
@@ -193,8 +211,10 @@ def main():
 
     files = collect()
 
-    if args.full and args.keyword:
-        # ripgrep if available (much faster over GBs), else plain grep
+    if args.full and args.keyword and files:
+        # ripgrep if available (much faster over GBs), else plain grep.
+        # Only shell out when there are files: rg/grep with no paths would
+        # scan the CWD (rg) or block on stdin (grep).
         rg = shutil.which("rg")
         cmd = [rg, "-l", "-i", args.keyword, *[f for _, _, _, f in files]] if rg \
             else ["grep", "-l", "-i", args.keyword, *[f for _, _, _, f in files]]
