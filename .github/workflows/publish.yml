@@ -14,8 +14,6 @@ jobs:
   publish:
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # trusted publishing to PyPI, no token stored
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,8 +22,9 @@ jobs:
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
-  # create a GitHub release alongside the PyPI upload
   release:
     needs: publish
     runs-on: ubuntu-latest

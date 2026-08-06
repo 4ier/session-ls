@@ -133,13 +133,18 @@ stores, no network.
 4. The `publish` workflow runs tests, builds the wheel/sdist, uploads to
    PyPI, and creates a GitHub release with auto-generated notes.
 
-One-time setup on PyPI (only needed once, per project):
+One-time setup: store your PyPI API token as a repository secret.
 
-1. Create the project at https://pypi.org/manage/projects/ (name
-   `session-ls`) - or let the first publish create it.
-2. Add a trusted publisher: *Add a new publisher*, owner
-   `4ier`, repository `session-ls`, workflow name `publish`.
-   This replaces API tokens entirely; nothing is stored in the repo.
+1. Create an API token at https://pypi.org/manage/account/token/ (scope
+   "Project: session-ls" is enough; account-wide also works).
+2. Store it as a GitHub Actions secret:
+
+   ```bash
+   gh secret set PYPI_API_TOKEN
+   ```
+
+   gh prompts for the value without echoing it. The secret never appears
+   in the repository or the workflow file.
 
 ## Code of conduct
 
