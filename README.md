@@ -4,10 +4,11 @@ List and search session history across all coding agents on your machine:
 pi, codex, claude, cursor.
 
 ```
-$ session-ls 局域网
-AGENT   STARTED              LAST                  CWD                     TITLE
-pi      2026-07-17T14:42:45  2026-07-18T08:45:13   /Users/fourier           局域网中有一台android设备，上面跑了termux...
-pi      2026-06-15T03:08:57  2026-06-15T03:31:55   /Users/fourier           为啥我局域网连接了linux-ap，跑lazycat vpn...
+$ session-ls -n 3
+AGENT   STARTED              LAST                  CWD                            TITLE
+codex   2026-07-29T00:03:17  2026-07-29T00:21:15   /home/alice/projects/website   fix the login redirect loop
+pi      2026-07-17T14:42:45  2026-07-18T08:45:13   /home/alice/projects/backend   tune the postgres connection pool
+claude  2026-06-15T03:08:57  2026-06-15T03:31:55   /home/alice/dotfiles           migrate to starship prompt
 ```
 
 Sessions are read directly from each agent's local store, newest first. The
