@@ -92,6 +92,13 @@ REGISTRY = [
 ]
 ```
 
+## Agent skill
+
+For AI agents (pi et al.), `skills/session-ls/SKILL.md` is a ready-to-install
+skill: when to use session-ls, common flag combos, and how to pipe results
+into a read of the underlying session files. Copy `skills/session-ls` into
+your agent's skills directory to enable it.
+
 ## Development
 
 ```bash
