@@ -1,0 +1,35 @@
+name: 4top validation bootstrap
+on:
+  push:
+    branches: [4top/implementation]
+    paths: [.github/workflows/4top-bootstrap.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Fetch public test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux
+          mkdir -p validation-deps/wheels validation-deps/bin validation-deps/lib
+          python -m pip download --only-binary=:all: --dest validation-deps/wheels 'textual==8.2.8' pytest pytest-asyncio pexpect build setuptools wheel ruff
+          cp "$(command -v tmux)" validation-deps/bin/
+          ldd "$(command -v tmux)" | awk '/libevent|libutempter/{print $3}' | xargs -r -I{} cp {} validation-deps/lib/
+          git archive HEAD -o validation-deps/baseline.tar
+          tmux -V > validation-deps/environment.txt
+          python --version >> validation-deps/environment.txt
+          (cd validation-deps && find . -type f ! -name SHA256SUMS -exec sha256sum {} \; > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 4top-public-validation-deps
+          path: validation-deps/
+          retention-days: 7
