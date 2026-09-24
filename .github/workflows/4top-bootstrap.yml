@@ -23,7 +23,7 @@ jobs:
           mkdir -p validation-deps/wheels validation-deps/bin validation-deps/lib
           python -m pip download --only-binary=:all: --dest validation-deps/wheels 'textual==8.2.8' pytest pytest-asyncio pexpect build setuptools wheel ruff
           cp "$(command -v tmux)" validation-deps/bin/
-          ldd "$(command -v tmux)" | awk '/libevent|libutempter/{print $3}' | xargs -r -I{} cp {} validation-deps/lib/
+          ldd "$(command -v tmux)" | awk '/libevent|libutempter|libtinfo/{print $3}' | xargs -r -I{} cp {} validation-deps/lib/
           git archive HEAD -o validation-deps/baseline.tar
           tmux -V > validation-deps/environment.txt
           python --version >> validation-deps/environment.txt
