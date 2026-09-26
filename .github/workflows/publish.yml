@@ -30,6 +30,28 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
           print-hash: true
 
+      - name: Wait until PyPI serves the new version
+        # A freshly uploaded version is not visible on every CDN edge at once, so
+        # anything that pins it immediately (a downstream lock file, for instance)
+        # can race the release. Fail loudly instead of leaving that to the next job.
+        run: |
+          read -r name version < <(python - <<'PY'
+          import tomllib
+          project = tomllib.load(open("pyproject.toml", "rb"))["project"]
+          print(project["name"], project["version"])
+          PY
+          )
+          for attempt in $(seq 1 30); do
+            if curl -fsS "https://pypi.org/pypi/${name}/${version}/json" >/dev/null 2>&1; then
+              echo "PyPI serves ${name} ${version}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "PyPI did not serve ${name} ${version} within five minutes" >&2
+          exit 1
+
+
   release:
     needs: publish
     runs-on: ubuntu-latest
