@@ -1,0 +1,3 @@
+include LICENSE README.md
+recursive-include man *.1
+recursive-include tests *.py

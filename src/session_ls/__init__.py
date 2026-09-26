@@ -11,12 +11,22 @@ Add a new agent by appending one entry to REGISTRY:
 - user-text-extractor(line) -> first real user message text or ''
   ('' = keep scanning; drives the early-exit read)
 """
-import argparse, glob, json, os, re, shutil, signal, subprocess
+import argparse
+import glob
+import json
+import os
+import re
+import signal
+
+# The CLI tests replace this module attribute to prove that nothing shells out, so
+# the name has to exist even though the parser itself never spawns a process.
+import subprocess  # noqa: F401
+import tempfile
 from datetime import datetime, timezone
 
-signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".cache", "session_ls_cache.json")
+PARSER_VERSION = 2  # invalidates cached metadata whenever parsing changes
 
 _INJECTED_PREFIXES = ("<recommended_plugins>", "<environment_details>",
                       "<system-reminder>", "# AGENTS.md")
@@ -92,14 +102,37 @@ def _codex(f, head):
     return p.get("cwd"), p.get("timestamp") or h.get("timestamp")
 
 def _claude(f, head):
+    # Claude 2.1.x prepends metadata records and a session may hold no
+    # user/assistant message at all (opened, renamed, quit). Every such record
+    # still carries the sessionId, so identity comes from that, not from a
+    # message type that may never be written.
+    found = None
     for line in head:
         try:
             d = json.loads(line)
         except ValueError:
             continue  # one bad line must not hide the session
-        if d.get("type") == "user":
-            return d.get("cwd"), d.get("timestamp")
-    return None
+        if not (d.get("sessionId") or d.get("type") in ("user", "assistant", "summary")):
+            continue
+        if found is None:
+            found = [None, None]
+        found[0] = found[0] or d.get("cwd")
+        found[1] = found[1] or d.get("timestamp")
+        if found[0] and found[1]:
+            break
+    return tuple(found) if found else None
+
+
+def _native_title(head):
+    """The native session title, used only when the session has no user text."""
+    for line in head:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") in ("ai-title", "agent-name"):
+            return (d.get("aiTitle") or d.get("agentName") or "").strip()
+    return ""
 
 def _cursor(f, head):
     # ~/.cursor/projects/<cwd-dir>/agent-transcripts/<id>/<id>.jsonl
@@ -135,16 +168,25 @@ def collect():
 def _load_cache():
     try:
         with open(CACHE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # A cache written by different parsing rules must not be trusted.
+        return data if isinstance(data, dict) and data.get("__parser__") == PARSER_VERSION else {}
     except Exception:
         return {}
 
 def _save_cache(cache):
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-    tmp = CACHE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False)
-    os.replace(tmp, CACHE)
+    fd, tmp = tempfile.mkstemp(prefix=".session-ls-", dir=os.path.dirname(CACHE))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CACHE)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
 
 def parse_all(files):
     cache = _load_cache()
@@ -152,7 +194,7 @@ def parse_all(files):
     for name, parse, user_text, f in files:
         try:
             st = os.stat(f)
-            sig = [st.st_size, st.st_mtime]
+            sig = [st.st_size, st.st_mtime, PARSER_VERSION]
             c = cache.get(f)
             if c and c.get("sig") == sig:  # unchanged: reuse cached metadata
                 new_cache[f] = c
@@ -164,9 +206,12 @@ def parse_all(files):
             with open(f, encoding="utf-8", errors="replace") as fh:
                 head, title = [], ""
                 for _ in range(2000):
-                    line = fh.readline().strip()
-                    if not line:
+                    raw = fh.readline()
+                    if not raw:
                         break
+                    line = raw.strip()
+                    if not line:
+                        continue
                     head.append(line)
                     try:
                         title = user_text(line)
@@ -174,6 +219,8 @@ def parse_all(files):
                         title = ""  # one malformed line must not hide the session
                     if title:
                         break
+                if not title:
+                    title = _native_title(head)
         except Exception:
             continue
         try:
@@ -190,7 +237,7 @@ def parse_all(files):
         dirty = True
         rows.append(row)
     if dirty:
-        _save_cache(new_cache)
+        _save_cache({"__parser__": PARSER_VERSION, **new_cache})
     return rows
 
 def main():
@@ -212,15 +259,10 @@ def main():
     files = collect()
 
     if args.full and args.keyword and files:
-        # ripgrep if available (much faster over GBs), else plain grep.
-        # Only shell out when there are files: rg/grep with no paths would
-        # scan the CWD (rg) or block on stdin (grep).
-        rg = shutil.which("rg")
-        cmd = [rg, "-l", "-i", args.keyword, *[f for _, _, _, f in files]] if rg \
-            else ["grep", "-l", "-i", args.keyword, *[f for _, _, _, f in files]]
-        out = subprocess.run(cmd, capture_output=True, text=True).stdout
-        keep = set(out.splitlines())
-        files = [x for x in files if x[3] in keep]
+        # Literal, decoded matching. No subprocess, option ambiguity, or ARG_MAX limit.
+        from .api import contains_literal_file
+        files = [entry for entry in files
+                 if contains_literal_file(entry[3], [args.keyword.casefold()])]
 
     rows = parse_all(files)
 
@@ -257,4 +299,10 @@ def main():
         print(f"\n{len(rows)} sessions")
 
 if __name__ == "__main__":
+    main()
+
+
+def cli():
+    """Console entry point; signal policy belongs here, never at import time."""
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     main()

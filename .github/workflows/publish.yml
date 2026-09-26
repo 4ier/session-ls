@@ -23,7 +23,12 @@ jobs:
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          # This repository publishes with an API token from its own secret. PyPI
+          # trusted publishing would remove the stored credential: add a publisher
+          # for this repository in the project's Publishing settings, then delete
+          # the secret and the password line.
           password: ${{ secrets.PYPI_API_TOKEN }}
+          print-hash: true
 
   release:
     needs: publish

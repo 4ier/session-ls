@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """End-to-end CLI tests for session-ls: run `pytest tests/` or
 `python3 -m pytest` (plain asserts, also runnable one file at a time)."""
-import contextlib, io, json, os, sys, tempfile
-from datetime import datetime, timezone
+import contextlib
+import io
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import session_ls as s
+
 
 def _pi_session(cwd, ts, msgs):
     lines = [json.dumps({"type": "session", "id": "x", "timestamp": ts, "cwd": cwd})]
@@ -102,7 +108,7 @@ def test_list_and_json_output():
     reg = _pi_registry(d)
     paths = _run(["-l", "web"], reg).splitlines()
     assert len(paths) == 1 and paths[0].endswith("c.jsonl")
-    rows = [json.loads(l) for l in _run(["--json"], reg).splitlines()]
+    rows = [json.loads(line) for line in _run(["--json"], reg).splitlines()]
     assert [r["title"] for r in rows] == ["deploy web app", "tune postgres pool", "fix login loop"]
     assert set(rows[0]) == {"agent", "cwd", "started", "last", "title", "file"}
     # --json + -l: --json wins (checked first in main())

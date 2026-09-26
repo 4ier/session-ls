@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Parser checks for session-ls: run `pytest tests/` or `python3 -m pytest`."""
-import json, os, sys, tempfile
+import json
+import os
+import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 import session_ls as s
@@ -253,3 +256,28 @@ if __name__ == "__main__":
     for _n in sorted(n for n in dir() if n.startswith("test_")):
         globals()[_n]()
         print("ok", _n)
+
+def test_claude_metadata_only_session_is_listed():
+    # Claude 2.1.x prepends metadata records; a session with no user/assistant
+    # message (opened, renamed, quit) must still be listed.
+    n = "5726ba4e-467c-47a3-9f79-ebcb5f105cbf"
+    d = _write({
+        "c3.jsonl": [
+            json.dumps({"type": "last-prompt", "leafUuid": "x", "sessionId": n}),
+            json.dumps({"type": "attachment", "cwd": "/tmp/c3",
+                        "timestamp": "2026-09-23T03:25:31.930Z", "sessionId": n}),
+        ],
+        "c4.jsonl": [json.dumps({"type": "ai-title", "aiTitle": "renamed session", "sessionId": n})],
+        "c5.jsonl": [
+            json.dumps({"type": "ai-title", "aiTitle": "generated", "sessionId": n}),
+            json.dumps({"type": "user", "cwd": "/tmp/c5", "timestamp": "2026-09-24T00:00:00Z",
+                        "message": {"role": "user", "content": "my own words"}}),
+        ],
+    })
+    rows = s.parse_all([("claude", s._claude, s._claude_user, os.path.join(d, name))
+                        for name in ("c3.jsonl", "c4.jsonl", "c5.jsonl")])
+    assert len(rows) == 3, rows
+    assert rows[0]["cwd"] == "/tmp/c3" and rows[0]["started"].startswith("2026-09-23")
+    assert rows[0]["title"] == ""
+    assert rows[1]["title"] == "renamed session"          # native title used as fallback
+    assert rows[2]["title"] == "my own words"             # user text still outranks it

@@ -19,20 +19,22 @@ codex `<recommended_plugins>` or `AGENTS.md` instructions is skipped).
 
 - **Fast.** Metadata is cached in `~/.cache/session_ls_cache.json`, keyed by
   file size + mtime; unchanged files are never re-read. Listing ~1000
-  sessions takes milliseconds. Full-text search uses `ripgrep` when
-  available (fallback: `grep`).
+  sessions takes milliseconds. Full-text search streams literal matches and decoded JSON Unicode text.
 - **Plain search, no semantics.** No index, no embeddings, no network.
   Matching is literal substring comparison. Decide what's relevant
   yourself - or hand the file paths to an LLM.
-- **Lightweight, zero dependencies.** Pure stdlib, one module.
+- **Lightweight, zero dependencies.** Pure stdlib: a legacy `session-ls` CLI, and
+  a versioned typed API (`session_ls.api`) for programs such as 4top.
 - **Extensible.** Adding another agent is one `REGISTRY` entry plus two
   small functions (see below).
 
 ## Install
 
 ```bash
-pip install .            # from a checkout
-pipx install .           # recommended: isolated environment
+uv tool install session-ls   # or:
+pipx install session-ls      # isolated environment
+pip install session-ls       # into the current environment
+pip install -e '.[dev]'      # from a checkout, to work on it
 ```
 
 Requires Python >= 3.9. A man page (`session-ls(1)`) is installed alongside;
@@ -47,7 +49,7 @@ session-ls [KEYWORD] [OPTIONS]
 | Option | Meaning |
 | --- | --- |
 | `KEYWORD` | search titles (first user message), case-insensitive substring |
-| `-f, --full` | search full session content instead of titles (slow, uses rg/grep) |
+| `-f, --full` | search full session content instead of titles (literal decoded-text scan) |
 | `-a, --agent` | only this agent: `pi`, `codex`, `claude`, `cursor` |
 | `-c, --cwd` | only sessions under a cwd substring |
 | `--since DATE` | started on/after (YYYY-MM-DD) |
@@ -109,3 +111,10 @@ python -m session_ls ...       # run from a checkout
 ## License
 
 MIT
+
+## 0.2 API
+
+`session_ls.api` exposes explicit `Root`, `HistoryIndex`, `HistoryRecord`,
+`search_full`, and `excerpt` objects. Inject roots/cache/host identity rather than
+changing process-global HOME. The legacy command still emits the same six JSON
+fields. Package imports do not change SIGPIPE. No TUI dependencies are required.

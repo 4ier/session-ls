@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "session-ls"
-version = "0.1.0"
+version = "0.2.1"
 description = "List and search session history across coding agents (pi, codex, claude, cursor)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,7 +25,7 @@ Repository = "https://github.com/4ier/session-ls"
 Issues = "https://github.com/4ier/session-ls/issues"
 
 [project.scripts]
-session-ls = "session_ls:main"
+session-ls = "session_ls:cli"   # cli() installs the SIGPIPE policy, then runs main()
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -34,5 +34,15 @@ packages = ["session_ls"]
 [tool.setuptools.data-files]
 "share/man/man1" = ["man/session-ls.1"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2", "ruff>=0.16,<0.17"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
