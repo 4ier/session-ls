@@ -22,7 +22,7 @@ from . import _claude_user, _codex_user, _cursor_user, _injected, _pi_user
 from .storage import atomic_json, file_lock, read_json
 
 API_VERSION = 1
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 PATTERNS = {
     "claude": ("projects/*/*.jsonl",),
     "codex": ("sessions/*/*/*/rollout-*.jsonl", "archived_sessions/rollout-*.jsonl"),
@@ -109,6 +109,14 @@ class HistoryRecord:
     # subagent", so records from older caches and other agents read unchanged.
     subagent: bool = False
     parent: Optional[str] = None
+    # From the end of the transcript: "working" while the agent is mid-turn (a tool
+    # call or its result is the last thing written), "waiting" once it has handed
+    # the turn back, "" when the tail says neither. Whether "working" has gone
+    # stale depends on the clock, so it is left to the caller, with `last`.
+    activity: str = ""
+    # The person's most recent request, and the git branch the session last named.
+    last_request: str = ""
+    branch: str = ""
 
     @property
     def can_resume(self) -> bool:
@@ -197,9 +205,114 @@ def _codex_parent(payload: dict) -> tuple[bool, Optional[str]]:
     return True, _text_field(parent)
 
 
+TAIL_BYTES = 2**19
+REQUEST_BYTES = 2**22
+
+
+def _claude_activity(data: dict) -> str:
+    kind = data.get("type")
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    content = message.get("content")
+    blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+    if kind == "assistant":
+        if any(b.get("type") == "tool_use" for b in blocks):
+            return "working"
+        if message.get("stop_reason") in ("end_turn", "stop_sequence", "max_tokens"):
+            return "waiting"
+        return ""  # a streamed fragment: the next record decides
+    if kind == "user":
+        return "working"  # a tool result, or a message the agent is answering
+    return ""
+
+
+def _codex_activity(data: dict) -> str:
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    kind, sub = data.get("type"), payload.get("type")
+    if kind == "event_msg":
+        if sub in ("task_complete", "turn_aborted"):
+            return "waiting"
+        if sub in ("task_started", "user_message", "exec_command_begin", "exec_command_end"):
+            return "working"
+        return ""
+    if kind == "response_item":
+        if sub in ("function_call", "function_call_output", "custom_tool_call",
+                   "custom_tool_call_output", "local_shell_call", "reasoning"):
+            return "working"
+        if sub == "message" and payload.get("role") == "user":
+            return "working"
+    return ""  # an assistant message may be interim commentary; task_complete ends a turn
+
+
+def _pi_activity(data: dict) -> str:
+    if data.get("type") != "message":
+        return ""
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    role = message.get("role")
+    content = message.get("content")
+    blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+    if role == "assistant":
+        return "working" if any(b.get("type") == "toolCall" for b in blocks) else "waiting"
+    if role in ("user", "toolResult"):
+        return "working"
+    return ""
+
+
+ACTIVITY = {"claude": _claude_activity, "codex": _codex_activity, "pi": _pi_activity}
+
+
+def _tail(handle, agent: str, size: int) -> tuple[str, str, str]:
+    """Activity, latest request and branch, from the last part of a transcript.
+
+    Activity and branch are near the end. The latest request can be far behind it
+    when an agent works alone for hours, so that search continues backwards, one
+    window at a time, up to REQUEST_BYTES.
+    """
+    if agent not in ACTIVITY:
+        return "", "", ""
+    activity = request = branch = ""
+    end = size
+    while end > 0 and size - end < REQUEST_BYTES:
+        start = max(0, end - TAIL_BYTES)
+        handle.seek(start)
+        lines = handle.read(end - start).split(b"\n")
+        if start and len(lines) > 1:
+            # Cut mid-line: the next window ends at that line's newline.
+            end, lines = start + len(lines[0]), lines[1:]
+        elif start:
+            # The whole window is inside one line longer than a window (tool output
+            # of megabytes): skip past it, so the search always moves back.
+            end, lines = start, []
+        else:
+            end = 0
+        for raw in reversed(lines):
+            try:
+                data = json.loads(raw)
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if not activity:
+                activity = ACTIVITY[agent](data)
+            if not branch and agent == "claude":
+                branch = _text_field(data.get("gitBranch")) or ""
+            if not request:
+                try:
+                    text = EXTRACTORS[agent](raw.decode("utf-8", "replace"))
+                except (ValueError, TypeError, AttributeError):
+                    text = ""
+                if text and not _injected(text):
+                    request = text
+            if activity and request and (branch or agent != "claude"):
+                return activity, request, branch
+        if request:
+            break  # only the request is worth reading further back for
+    return activity, request, branch
+
+
 def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int = 2**21,
                   max_lines: int = 2000) -> tuple[HistoryRecord, list]:
     native_id = cwd = started = title = native_title = parent = None
+    head_branch = ""
     subagent = saw_codex_meta = False
     problems = []
     saw_metadata = False
@@ -242,6 +355,8 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                         # records; the file's own identity is the first one.
                         subagent, parent = _codex_parent(payload)
                         saw_codex_meta = True
+                        git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+                        head_branch = _text_field(git.get("branch")) or ""
             elif root.agent == "claude":
                 # Claude 2.1.x writes a metadata prelude (last-prompt, mode,
                 # permission-mode, attachment, file-history-snapshot, cost-state,
@@ -270,6 +385,7 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                 break
         if not exhausted and used <= max_bytes:
             problems.append("Metadata line budget reached")
+        activity, last_request, tail_branch = _tail(handle, root.agent, st.st_size)
     if not saw_metadata:
         if not any("budget" in problem for problem in problems):
             raise ValueError("Unrecognized history format")
@@ -298,7 +414,7 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
         history_key(host_id, root.agent, root.path, native_id, file), root.agent,
         root.path, native_id, cwd or "", quality, _date(started, last), last,
         title or "", file, "partial" if problems else "available", tuple(dict.fromkeys(problems)),
-        subagent, parent
+        subagent, parent, activity, last_request, tail_branch or head_branch
     ), signature
 
 

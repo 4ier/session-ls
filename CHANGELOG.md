@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `HistoryRecord.activity`, `last_request` and `branch`, read from the end of a
+  transcript. `activity` is "working" while the agent is mid-turn (its last record
+  is a tool call or result) and "waiting" once it has handed the turn back
+  (Claude `end_turn`, Codex `task_complete`, a Pi reply without a tool call). The
+  latest request skips injected context and tool results and is searched up to
+  4 MB back, past single lines longer than the read window. The branch comes from
+  Claude's `gitBranch` and Codex's `session_meta.git`. On a store of 1397 sessions:
+  request found for 1331, branch for 1046; a cold scan took 18 s, a warm one 0.3 s.
+- `PARSER_VERSION` 4 re-reads cached metadata once.
+
 ## 0.2.2 — 2026-09-28
 
 - Titles are the first thing the person typed. A Codex message carries plugin lists,
