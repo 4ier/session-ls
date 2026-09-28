@@ -466,3 +466,83 @@ def test_subagent_fields_survive_the_cache(tmp_path):
     again = HistoryIndex([root], cache).scan().records
     assert [(r.subagent, r.parent) for r in again] == [(r.subagent, r.parent) for r in first] \
         == [(True, CODEX_PARENT)]
+
+
+# The end of a transcript: what the agent is doing, what was last asked, and on
+# which branch.
+
+def claude_turn(role, content, stop=None, branch="feat/x"):
+    message = {"role": role, "content": content}
+    if stop:
+        message["stop_reason"] = stop
+    return {"type": role, "sessionId": CLAUDE_NATIVE, "cwd": "/tmp", "gitBranch": branch,
+            "timestamp": "2026-09-28T00:00:00Z", "message": message}
+
+
+def test_claude_mid_turn_is_working_and_a_finished_turn_is_waiting(tmp_path):
+    root, file = make_claude(tmp_path, [
+        claude_turn("user", "fix the flaky retry test"),
+        claude_turn("assistant", [{"type": "tool_use", "name": "Bash", "input": {}}]),
+        claude_turn("user", [{"type": "tool_result", "content": "ok"}]),
+        {"type": "attachment", "sessionId": CLAUDE_NATIVE},
+    ])
+    record, _ = read_metadata(root, str(file))
+    assert record.activity == "working"
+    assert record.last_request == "fix the flaky retry test", "a tool result is not a request"
+    assert record.branch == "feat/x"
+
+    with file.open("a") as handle:
+        handle.write(json.dumps(claude_turn("assistant", [{"type": "text", "text": "done"}],
+                                            stop="end_turn", branch="feat/y")) + "\n")
+    record, _ = read_metadata(root, str(file))
+    assert record.activity == "waiting" and record.branch == "feat/y"
+
+
+def test_codex_turn_state_request_and_branch(tmp_path):
+    root, file = make_codex(tmp_path, [["first ask"], ["# AGENTS.md instructions for /repo", "second ask"]],
+                            meta={"git": {"branch": "codex/fix-retry"}})
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "response_item", "payload": {"type": "function_call"}}) + "\n")
+    record, _ = read_metadata(root, str(file))
+    assert record.activity == "working"
+    assert record.last_request == "second ask", "injected parts are not the request"
+    assert record.branch == "codex/fix-retry"
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+    assert read_metadata(root, str(file))[0].activity == "waiting"
+
+
+def test_pi_tool_call_is_working_and_plain_text_is_waiting(tmp_path):
+    root, file = make_pi(tmp_path, title="look at the logs")
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "message", "message": {
+            "role": "assistant", "content": [{"type": "toolCall", "name": "bash"}]}}) + "\n")
+    record, _ = read_metadata(root, str(file))
+    assert record.activity == "working" and record.last_request == "look at the logs"
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "message", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "found it"}]}}) + "\n")
+    assert read_metadata(root, str(file))[0].activity == "waiting"
+
+
+def test_the_request_is_found_behind_megabytes_of_tool_output(tmp_path):
+    # An agent working alone for hours buries the last request under tool output,
+    # including single lines longer than a read window. Searching back must still
+    # find it, and must never stall inside such a line.
+    root, file = make_codex(tmp_path, [["the real request"]])
+    huge = json.dumps({"type": "response_item", "payload": {
+        "type": "function_call_output", "output": "x" * 1_500_000}})
+    with file.open("a") as handle:
+        for _ in range(2):
+            handle.write(huge + "\n")
+    record, _ = read_metadata(root, str(file))
+    assert record.last_request == "the real request"
+    assert record.activity == "working"
+
+
+def test_records_from_before_the_tail_fields_still_load(tmp_path):
+    from session_ls.api import HistoryRecord
+    old = {"key": "k", "agent": "pi", "root": "/r", "native_id": None, "cwd": "/c",
+           "cwd_quality": "native", "started": "s", "last": "l", "title": "t", "file": "/f"}
+    record = HistoryRecord(**old)
+    assert (record.activity, record.last_request, record.branch) == ("", "", "")
