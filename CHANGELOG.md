@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 — 2026-09-29
 
 - `HistoryRecord.activity`, `last_request` and `branch`, read from the end of a
   transcript. `activity` is "working" while the agent is mid-turn (its last record
