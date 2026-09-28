@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 — 2026-09-28
 
 - Titles are the first thing the person typed. A Codex message carries plugin lists,
   `AGENTS.md` and the environment as parts of the same message as the request, and
