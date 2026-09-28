@@ -22,7 +22,7 @@ from . import _claude_user, _codex_user, _cursor_user, _injected, _pi_user
 from .storage import atomic_json, file_lock, read_json
 
 API_VERSION = 1
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 PATTERNS = {
     "claude": ("projects/*/*.jsonl",),
     "codex": ("sessions/*/*/*/rollout-*.jsonl", "archived_sessions/rollout-*.jsonl"),
@@ -103,6 +103,12 @@ class HistoryRecord:
     file: str
     status: str = "available"
     problems: tuple[str, ...] = ()
+    # A session another agent session started for itself: Codex's thread_spawn
+    # workers and its guardian approval reviewer. `parent` is the spawning
+    # session's native id when the child names it. Both default to "not a
+    # subagent", so records from older caches and other agents read unchanged.
+    subagent: bool = False
+    parent: Optional[str] = None
 
     @property
     def can_resume(self) -> bool:
@@ -174,9 +180,27 @@ def _date(value: Optional[str], fallback: str) -> str:
         return fallback
 
 
+def _codex_parent(payload: dict) -> tuple[bool, Optional[str]]:
+    """(is a subagent, parent native id) from a Codex session_meta payload.
+
+    Children carry ``source: {"subagent": ...}`` and usually ``parent_thread_id``;
+    some builds only say ``thread_source: "subagent"``.
+    """
+    source = payload.get("source")
+    spawned = isinstance(source, dict) and "subagent" in source
+    if not (spawned or payload.get("thread_source") in ("subagent", "guardian_review")):
+        return False, None
+    parent = payload.get("parent_thread_id")
+    if not parent and spawned and isinstance(source["subagent"], dict):
+        spawn = source["subagent"].get("thread_spawn")
+        parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+    return True, _text_field(parent)
+
+
 def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int = 2**21,
                   max_lines: int = 2000) -> tuple[HistoryRecord, list]:
-    native_id = cwd = started = title = native_title = None
+    native_id = cwd = started = title = native_title = parent = None
+    subagent = saw_codex_meta = False
     problems = []
     saw_metadata = False
     used = 0
@@ -213,6 +237,11 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                     native_id = native_id or _text_field(payload.get("id") or payload.get("session_id"))
                     cwd = cwd or _text_field(payload.get("cwd"))
                     started = started or _text_field(payload.get("timestamp") or data.get("timestamp"))
+                    if not saw_codex_meta:
+                        # A resumed or forked file can carry further session_meta
+                        # records; the file's own identity is the first one.
+                        subagent, parent = _codex_parent(payload)
+                        saw_codex_meta = True
             elif root.agent == "claude":
                 # Claude 2.1.x writes a metadata prelude (last-prompt, mode,
                 # permission-mode, attachment, file-history-snapshot, cost-state,
@@ -268,7 +297,8 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
     return HistoryRecord(
         history_key(host_id, root.agent, root.path, native_id, file), root.agent,
         root.path, native_id, cwd or "", quality, _date(started, last), last,
-        title or "", file, "partial" if problems else "available", tuple(dict.fromkeys(problems))
+        title or "", file, "partial" if problems else "available", tuple(dict.fromkeys(problems)),
+        subagent, parent
     ), signature
 
 

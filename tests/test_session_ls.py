@@ -281,3 +281,14 @@ def test_claude_metadata_only_session_is_listed():
     assert rows[0]["title"] == ""
     assert rows[1]["title"] == "renamed session"          # native title used as fallback
     assert rows[2]["title"] == "my own words"             # user text still outranks it
+
+
+def test_injected_markers_cover_current_clients():
+    for text in ("<environment_context>\n<cwd>/x</cwd>", "<codex_delegation>do x",
+                 "<heartbeat>\n<automation_id>a", "<subagent_notification>{}",
+                 "<user_action>\n<action>review", "<image name=[Image #1]>", "</image>",
+                 "<local-command-caveat>Caveat", "<command-name>/clear</command-name>",
+                 "The following is the Codex agent history whose request action"):
+        assert s._injected(text) is True, text
+    # the person's own words are never injected, even when they mention the markers
+    assert s._injected("why does <environment_context> show up in my title?") is False

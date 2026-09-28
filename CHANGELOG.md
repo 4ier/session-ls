@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Titles are the first thing the person typed. A Codex message carries plugin lists,
+  `AGENTS.md` and the environment as parts of the same message as the request, and
+  filtering the joined text dropped the request with them; parts are now filtered one
+  by one. Known wrappers are unwrapped instead of becoming the title: Codex desktop's
+  `## My request:` (attached files, annotations, referenced chats), a thread goal's
+  `<objective>`, and chat bridges' `<user_input>{"text": ...}`. Image wrappers,
+  slash-command echoes, `<local-command-caveat>`, heartbeats, delegations and the
+  guardian reviewer's prompt are injected context. On one real store of 2773
+  sessions, 1134 titles changed, and every top-level title that began with an
+  injected block now starts with the person's words.
+- `HistoryRecord.subagent` and `HistoryRecord.parent` mark sessions another agent
+  session started for itself (Codex `thread_spawn` workers and the guardian approval
+  reviewer): 1377 of 2441 Codex sessions on the same store. Both default to "not a
+  subagent", so existing callers and cached records read unchanged. Identity comes
+  from the first `session_meta`, even when a forked file carries more.
+- `PARSER_VERSION` 3 re-reads cached metadata once.
+
 ## 0.2.1
 
 - Carries the versioned `session_ls.api` and `session_ls.storage` modules, the

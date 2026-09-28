@@ -77,7 +77,9 @@ Rules:
 - Skip anything that is not genuinely the user's own words. Codex injects
   `<recommended_plugins>`, `AGENTS.md instructions`, and environment
   blocks as user-role messages; `_injected()` detects those. If your agent
-  does the same, reuse it.
+  does the same, reuse it, and pass the message's parts to `_title()`: it
+  filters part by part, so one injected part does not hide the request
+  after it, and it unwraps the known wrappers (`_OWN_TEXT`).
 - If the title carries wrappers (cursor wraps queries in
   `<timestamp>...</timestamp><user_query>...`), strip them before
   returning.

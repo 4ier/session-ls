@@ -336,3 +336,133 @@ def test_unreadable_directory_is_still_reported(tmp_path, monkeypatch):
     index = HistoryIndex([Root("pi", str(root.path))], tmp_path / "cache/data.json", "host")
     result = index.scan()
     assert any("PermissionError" in issue for issue in result.issues), result.issues
+
+
+CODEX_NATIVE = "01a0cc63-68c1-7d42-903d-f1afefd56793"
+CODEX_PARENT = "01a0ce81-fe83-79f0-a0b1-6e9d81767c43"
+
+
+def make_codex(tmp_path, messages, meta=None, extra=()):
+    """A Codex rollout: session_meta, optional extra records, then user messages,
+    each a list of text parts as Codex writes them."""
+    root = tmp_path / "codex"
+    file = root / "sessions/2026/09/28" / f"rollout-2026-09-28T00-00-00-{CODEX_NATIVE}.jsonl"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"id": CODEX_NATIVE, "cwd": str(tmp_path), "timestamp": "2026-09-28T00:00:00Z",
+               **(meta or {})}
+    records = [{"type": "session_meta", "payload": payload}, *extra]
+    for parts in messages:
+        records.append({"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": part} for part in parts]}})
+    file.write_text("\n".join(json.dumps(value) for value in records) + "\n")
+    return Root("codex", str(root)), file
+
+
+def codex_title(tmp_path, *messages):
+    root, file = make_codex(tmp_path, messages)
+    return read_metadata(root, str(file))[0].title
+
+
+def test_injected_parts_of_one_message_do_not_hide_the_words_after_them(tmp_path):
+    # Codex sends plugin lists, AGENTS.md and the environment as parts of the same
+    # message as the request; filtering the joined text lost the request with them.
+    assert codex_title(tmp_path, [
+        "<recommended_plugins>\n- A\n</recommended_plugins>",
+        "# AGENTS.md instructions for /srv\n<INSTRUCTIONS>be brief</INSTRUCTIONS>",
+        "<environment_context>\n<cwd>/srv</cwd>\n</environment_context>",
+        "fix the retry loop"]) == "fix the retry loop"
+
+
+def test_a_message_of_only_injected_context_is_skipped(tmp_path):
+    assert codex_title(tmp_path,
+                       ["<environment_context>\n<cwd>/srv</cwd>\n</environment_context>"],
+                       ["<image name=[Image #1] path=\"/x.png\">", "</image>", "what is in it"],
+                       ["later message"]) == "what is in it"
+
+
+@pytest.mark.parametrize("wrapped, expected", [
+    ("# Files mentioned by the user:\n\n## spec.md: /srv/spec.md\n\n## My request for Codex:\n"
+     "summarise the spec\n", "summarise the spec"),
+    ("# Response annotations:\nItems...\n<response-annotations>[]</response-annotations>\n"
+     "## My request:\nuse my notes\n", "use my notes"),
+    ("# Files pasted by the user:\n\n## \"a pasted note\"\n\n## My request:\n",
+     "# Files pasted by the user:\n\n## \"a pasted note\"\n\n## My request:"),
+    ("# bridge conventions\nlong rules\n<user_input>\n{\"text\":\"is this a bug?\"}\n</user_input>",
+     "is this a bug?"),
+    ("<codex_internal_context source=\"goal\">\nContinue.\n<objective>\nship the fix\n"
+     "</objective>\nrules\n</codex_internal_context>", "ship the fix"),
+])
+def test_the_persons_words_are_recovered_from_known_wrappers(tmp_path, wrapped, expected):
+    assert codex_title(tmp_path, [wrapped]) == expected
+
+
+def test_an_empty_bridge_message_does_not_fall_back_to_its_conventions(tmp_path):
+    assert codex_title(tmp_path,
+                       ["# bridge conventions\n<user_input>{\"text\":\"\"}</user_input>"],
+                       ["real question"]) == "real question"
+
+
+def test_paragraph_wrappers_and_doubled_links_are_tidied(tmp_path):
+    assert codex_title(tmp_path, ["<user_input>{\"text\":\"<p> check this</p>\"}</user_input>"]) \
+        == "check this"
+    assert codex_title(tmp_path, ["[https://example.test/a](https://example.test/a) explain"]) \
+        == "https://example.test/a explain"
+    # A link whose text differs from its target is left as written.
+    assert codex_title(tmp_path, ["[the issue](https://example.test/1)"]) \
+        == "[the issue](https://example.test/1)"
+
+
+def test_slash_command_echoes_are_not_titles(tmp_path):
+    root, file = make_claude(tmp_path, [
+        {"type": "user", "sessionId": CLAUDE_NATIVE, "cwd": str(tmp_path),
+         "message": {"content": "<local-command-caveat>Caveat: generated</local-command-caveat>"}},
+        {"type": "user", "sessionId": CLAUDE_NATIVE,
+         "message": {"content": "<command-name>/model</command-name>\n<command-args></command-args>"}},
+        {"type": "user", "sessionId": CLAUDE_NATIVE, "message": {"content": "real work"}},
+    ])
+    record, _ = read_metadata(root, str(file))
+    assert record.title == "real work"
+
+
+@pytest.mark.parametrize("meta, parent", [
+    ({"source": {"subagent": {"other": "guardian"}}, "parent_thread_id": CODEX_PARENT,
+      "thread_source": "guardian_review"}, CODEX_PARENT),
+    ({"source": {"subagent": {"thread_spawn": {"parent_thread_id": CODEX_PARENT, "depth": 1}}},
+      "thread_source": "subagent"}, CODEX_PARENT),
+    ({"source": "vscode", "thread_source": "subagent"}, None),
+])
+def test_codex_subagents_are_marked_with_their_parent(tmp_path, meta, parent):
+    root, file = make_codex(tmp_path, [["reviewing"]], meta)
+    record, _ = read_metadata(root, str(file))
+    assert record.subagent is True and record.parent == parent
+
+
+def test_a_top_level_session_is_not_a_subagent(tmp_path):
+    root, file = make_codex(tmp_path, [["hello"]], {"source": "vscode", "thread_source": "user"})
+    record, _ = read_metadata(root, str(file))
+    assert record.subagent is False and record.parent is None
+    root, file = make_pi(tmp_path)
+    assert read_metadata(root, str(file))[0].subagent is False
+
+
+def test_a_later_session_meta_does_not_change_whose_session_this_is(tmp_path):
+    # A forked or resumed rollout can carry the parent's session_meta further down;
+    # the file's identity, and whether it is a subagent, come from the first one.
+    later = {"type": "session_meta", "payload": {"id": CODEX_PARENT, "source": "vscode"}}
+    root, file = make_codex(tmp_path, [["reviewing"]],
+                            {"source": {"subagent": {"other": "guardian"}},
+                             "parent_thread_id": CODEX_PARENT}, extra=[later])
+    record, _ = read_metadata(root, str(file))
+    assert record.native_id == CODEX_NATIVE and record.subagent and record.parent == CODEX_PARENT
+
+
+def test_subagent_fields_survive_the_cache(tmp_path):
+    root, file = make_codex(tmp_path, [["reviewing"]],
+                            {"source": {"subagent": {"other": "guardian"}},
+                             "parent_thread_id": CODEX_PARENT})
+    cache = tmp_path / "cache.json"
+    first = HistoryIndex([root], cache).scan().records
+    again = HistoryIndex([root], cache).scan().records
+    assert [(r.subagent, r.parent) for r in again] == [(r.subagent, r.parent) for r in first] \
+        == [(True, CODEX_PARENT)]

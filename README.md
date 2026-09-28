@@ -12,8 +12,10 @@ claude  2026-06-15T03:08:57  2026-06-15T03:31:55   /home/alice/dotfiles         
 ```
 
 Sessions are read directly from each agent's local store, newest first. The
-title of a session is its first real user message (injected context such as
-codex `<recommended_plugins>` or `AGENTS.md` instructions is skipped).
+title of a session is the first thing the person actually typed. Injected context
+(plugin lists, `AGENTS.md`, environment blocks, image wrappers, slash-command
+echoes) is skipped part by part, and wrapped requests are unwrapped: Codex desktop's
+`## My request:`, a thread goal's `<objective>`, and chat bridges' `<user_input>`.
 
 ## Design
 
@@ -118,3 +120,8 @@ MIT
 `search_full`, and `excerpt` objects. Inject roots/cache/host identity rather than
 changing process-global HOME. The legacy command still emits the same six JSON
 fields. Package imports do not change SIGPIPE. No TUI dependencies are required.
+
+`HistoryRecord.subagent` is true for a session another agent session started for
+itself (Codex `thread_spawn` workers and the guardian approval reviewer), and
+`HistoryRecord.parent` is the spawning session's native id when the child names it.
+Both default to "not a subagent".
