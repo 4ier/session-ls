@@ -26,16 +26,81 @@ from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".cache", "session_ls_cache.json")
-PARSER_VERSION = 2  # invalidates cached metadata whenever parsing changes
+PARSER_VERSION = 3  # invalidates cached metadata whenever parsing changes
 
-_INJECTED_PREFIXES = ("<recommended_plugins>", "<environment_details>",
-                      "<system-reminder>", "# AGENTS.md")
+# A user message often opens with context the client injected, not text the person
+# typed: environment and plugin lists, AGENTS.md, attached-image wrappers, slash
+# command echoes, and the prompts one agent writes for another. A part that starts
+# with one of these is skipped, and the title comes from the rest.
+_INJECTED_PREFIXES = ("<recommended_plugins>", "<environment_details>", "<environment_context>",
+                      "<user_instructions>", "<system-reminder>", "# AGENTS.md",
+                      "<codex_delegation>", "<codex_internal_context", "<heartbeat>",
+                      "<subagent_notification>", "<user_action>", "<in-app-browser-context",
+                      "<external_codex_apps_", "<turn_aborted>", "<image ", "</image>",
+                      "<local-command-caveat>", "<local-command-stdout>", "<command-name>",
+                      "<command-message>", "The following is the Codex agent history")
+
+# Some clients wrap the person's words together with context in one text part. The
+# words are recovered from the wrapper instead of losing the whole message:
+# (how the part starts, where the person's own text is, keep the part if that is empty).
+_OWN_TEXT = (
+    # Codex desktop puts attached files, response annotations or referenced chats
+    # first and the request itself under a fixed heading. An empty request means the
+    # person only pasted or attached something, and that is what they sent.
+    (("# Files mentioned by the user", "# Files pasted by the user", "# Response annotations",
+      "## Referenced chats"), re.compile(r"## My request(?: for Codex)?:\s*(.*)\Z", re.S), True),
+    # A thread goal: the objective is the person's own words.
+    (('<codex_internal_context source="goal">',),
+     re.compile(r"<objective>\s*(.*?)\s*</objective>", re.S), False),
+    # Chat bridges (e.g. Feishu/Lark) send conventions first and the message last, as
+    # <user_input>{"text": ...}</user_input>.
+    (None, re.compile(r"<user_input>\s*(.*?)\s*</user_input>", re.S), False),
+)
 
 
 def _injected(t):
     """True if this user message is injected context, not the user's own text."""
     t = t.lstrip()
     return t.startswith(_INJECTED_PREFIXES) or "AGENTS.md instructions" in t
+
+
+def _own_text(t):
+    """The person's words inside a known wrapper; None if t is not wrapped."""
+    for starts, pattern, keep_if_empty in _OWN_TEXT:
+        if starts is not None and not t.startswith(starts):
+            continue
+        found = pattern.findall(t)
+        if not found:
+            continue
+        text = found[-1].strip()
+        if text.startswith("{"):
+            try:
+                value = json.loads(text)
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and isinstance(value.get("text"), str):
+                text = value["text"].strip()
+        return text or (t if keep_if_empty else "")
+    return None
+
+
+def _title(parts):
+    """Join the parts of one user message that the person actually wrote."""
+    kept = []
+    for part in parts:
+        t = part.strip() if isinstance(part, str) else ""
+        if not t:
+            continue
+        own = _own_text(t)
+        if own is None:
+            own = "" if _injected(t) else t
+        if own.startswith("<p>"):
+            # Rich-text bridges wrap a plain message in paragraph tags.
+            own = re.sub(r"</?p>", " ", own).strip()
+        if own:
+            kept.append(own)
+    # A pasted link becomes [url](url) in some clients; the title needs it once.
+    return re.sub(r"\[(https?://[^\]\s]+)\]\(\1\)", r"\1", " ".join(kept)).strip()
 
 
 # ---- user-text extractors: line -> first real user text or '' --------------
@@ -47,9 +112,8 @@ def _pi_user(line):
     content = m.get("content")
     if not isinstance(content, list):
         return ""
-    t = " ".join(p.get("text", "") for p in content
-                 if isinstance(p, dict) and p.get("type") == "text").strip()
-    return t if t and not _injected(t) else ""
+    return _title(p.get("text", "") for p in content
+                  if isinstance(p, dict) and p.get("type") == "text")
 
 def _codex_user(line):
     p = json.loads(line).get("payload", {}) or {}
@@ -58,9 +122,8 @@ def _codex_user(line):
     content = p.get("content")
     if not isinstance(content, list):
         return ""
-    t = " ".join(c.get("text", "") for c in content
-                 if isinstance(c, dict) and c.get("type") in ("input_text", "text")).strip()
-    return t if t and not _injected(t) else ""
+    return _title(c.get("text", "") for c in content
+                  if isinstance(c, dict) and c.get("type") in ("input_text", "text"))
 
 def _claude_user(line):
     d = json.loads(line)
@@ -68,13 +131,11 @@ def _claude_user(line):
         return ""
     c = (d.get("message") or {}).get("content")
     if isinstance(c, str):
-        t = c
-    elif isinstance(c, list):
-        t = " ".join(b.get("text", "") for b in c
-                     if isinstance(b, dict) and b.get("type") == "text")
-    else:
-        t = ""
-    return t.strip()
+        return _title([c])
+    if isinstance(c, list):
+        return _title(b.get("text", "") for b in c
+                      if isinstance(b, dict) and b.get("type") == "text")
+    return ""
 
 def _cursor_user(line):
     d = json.loads(line)
