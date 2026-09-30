@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `<task-notification>` (Claude Code telling the agent a background task finished)
+  and `<local-command-stderr>` are injected context, not the person's request, so
+  they are no longer a title or the latest request.
 - Repeated `HistoryIndex.scan` calls in one process are cheap and return exactly
   what a scan from nothing returns. A directory whose inode, mtime and ctime are
   unchanged keeps its listing (creating, removing or renaming an entry changes

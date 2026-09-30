@@ -158,6 +158,8 @@ def test_injected_only_known_markers():
     assert s._injected("why does <a> do this") is False
     # known codex / claude injections are still skipped
     assert s._injected("<recommended_plugins>boiler") is True
+    # Claude Code tells the agent a background task finished as a user message.
+    assert s._injected("<task-notification> <task-id>a1da</task-id>") is True
     assert s._injected("<environment_details>...") is True
     assert s._injected("# AGENTS.md instructions") is True
     assert s._injected("see AGENTS.md instructions") is True
