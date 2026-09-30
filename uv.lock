@@ -224,7 +224,7 @@ wheels = [
 
 [[package]]
 name = "session-ls"
-version = "0.2.3"
+version = "0.2.4"
 source = { editable = "." }
 
 [package.optional-dependencies]
