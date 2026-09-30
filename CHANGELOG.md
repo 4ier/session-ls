@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- Repeated `HistoryIndex.scan` calls in one process are cheap and return exactly
+  what a scan from nothing returns. A directory whose inode, mtime and ctime are
+  unchanged keeps its listing (creating, removing or renaming an entry changes
+  them); a listing is reused only once its directory has been still for
+  `listing_settle_seconds` (2 s), so a coarse filesystem clock cannot hide a change.
+  Every session file is still `lstat`ed on every scan, so an append is never missed;
+  a file whose size, times, inode, mode and owner are unchanged since it was opened
+  keeps its record, and only changed files are opened. The metadata cache file is
+  rewritten at most every `persist_seconds` (60 s) while sessions are being written;
+  records in memory are always current. On a store of 2798 sessions, a scan with
+  nothing changed went from 207 ms to 12 ms of CPU, and one with an active session
+  from 275 ms to 9 ms. No API change: callers keep calling `scan()`.
+- A first message too short to say anything ("hi", "pwd", "exit", "继续", or
+  nothing: at most 8 terminal columns once whitespace is collapsed, a CJK character
+  counting two) gives way to the session's own name when it has one: Claude's
+  latest `custom-title` (a rename), else `ai-title`, else `agent-name`; Pi's latest
+  `session_info` name; Codex's latest `thread_name` for the session in
+  `session_index.jsonl`. A longer first message is still the title. On the same
+  store 44 titles changed (27 of them on top-level sessions); 39 had been empty.
+- `HistoryRecord.scripted` marks sessions started with no person at a prompt: a
+  Claude `entrypoint` of `sdk-*` (`claude -p`, the Agent SDK) and a Codex
+  `session_meta` with `originator: codex_exec` or `source: exec`. Pi records no such
+  marker. It defaults to false for records from older caches. On the same store:
+  769 of 2455 Codex sessions (236 of them subagents) and 9 of 49 Claude sessions.
+- `PARSER_VERSION` 5 re-reads cached metadata once.
+
 ## 0.2.3 — 2026-09-29
 
 - `HistoryRecord.activity`, `last_request` and `branch`, read from the end of a

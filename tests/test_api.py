@@ -546,3 +546,131 @@ def test_records_from_before_the_tail_fields_still_load(tmp_path):
            "cwd_quality": "native", "started": "s", "last": "l", "title": "t", "file": "/f"}
     record = HistoryRecord(**old)
     assert (record.activity, record.last_request, record.branch) == ("", "", "")
+
+
+# Titles: a first message too short to say anything gives way to the session's own
+# name, when it has one.
+
+def claude_user(text):
+    return {"type": "user", "cwd": "/tmp", "timestamp": "2026-09-24T00:00:00Z",
+            "sessionId": CLAUDE_NATIVE, "entrypoint": "cli",
+            "message": {"role": "user", "content": text}}
+
+
+def claude_name(kind, value):
+    field = {"custom-title": "customTitle", "ai-title": "aiTitle", "agent-name": "agentName"}[kind]
+    return {"type": kind, field: value, "sessionId": CLAUDE_NATIVE}
+
+
+@pytest.mark.parametrize("text,weak", [
+    ("", True), ("   ", True), ("pwd", True), ("hi", True), ("exit", True), ("继续任务", True),
+    ("ls  -la", True), ("continue", True), ("为什么500", False), ("fix the login", False),
+    ("磁盘又要满了", False), ("refactors", False),
+])
+def test_weak_title_rule(text, weak):
+    from session_ls.api import weak_title
+    assert weak_title(text) is weak
+
+
+def test_a_weak_claude_message_gives_way_to_the_latest_native_title(tmp_path):
+    root, file = make_claude(tmp_path, [
+        claude_name("ai-title", "first guess"), claude_user("hi"),
+        claude_name("ai-title", "debug the upload retry"),
+        claude_name("agent-name", "uploader"),
+    ])
+    assert read_metadata(root, str(file))[0].title == "debug the upload retry"
+
+
+def test_a_claude_rename_outranks_the_generated_title(tmp_path):
+    root, file = make_claude(tmp_path, [
+        claude_user("pwd"), claude_name("custom-title", "upload work"),
+        claude_name("ai-title", "debug the upload retry"),
+    ])
+    assert read_metadata(root, str(file))[0].title == "upload work"
+
+
+def test_a_real_first_message_keeps_the_title(tmp_path):
+    root, file = make_claude(tmp_path, [
+        claude_user("fix the upload retry"), claude_name("custom-title", "upload work"),
+    ])
+    assert read_metadata(root, str(file))[0].title == "fix the upload retry"
+
+
+def test_a_native_title_past_the_head_is_found_in_the_tail(tmp_path):
+    filler = [claude_turn("assistant", [{"type": "text", "text": "x"}], stop="end_turn")] * 30
+    root, file = make_claude(tmp_path, [claude_user("hi"), *filler,
+                                        claude_name("ai-title", "late title")])
+    assert read_metadata(root, str(file), max_lines=5)[0].title == "late title"
+
+
+def test_a_weak_message_without_a_native_title_stays(tmp_path):
+    root, file = make_claude(tmp_path, [claude_user("hi")])
+    with file.open("a") as handle:
+        handle.write('{"type": "assistant", "being written')  # read past the title
+    record = read_metadata(root, str(file))[0]
+    assert record.title == "hi" and record.status == "available", record.problems
+
+
+def test_a_named_pi_session(tmp_path):
+    root, file = make_pi(tmp_path, title="hi")
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "session_info", "name": "tune the pool"}) + "\n")
+    assert read_metadata(root, str(file))[0].title == "tune the pool"
+    with file.open("a") as handle:
+        handle.write(json.dumps({"type": "session_info", "name": ""}) + "\n")
+    assert read_metadata(root, str(file))[0].title == "hi", "an emptied name is cleared"
+
+
+def write_thread_names(root, *pairs):
+    with (Path(root.path) / "session_index.jsonl").open("a") as handle:
+        for native, name in pairs:
+            handle.write(json.dumps({"id": native, "thread_name": name,
+                                     "updated_at": "2026-09-28T00:00:00Z"}) + "\n")
+
+
+def test_codex_thread_names_title_weak_sessions(tmp_path):
+    root, file = make_codex(tmp_path, [["继续"]])
+    index = HistoryIndex([root], tmp_path / "cache/data.json")
+    assert [r.title for r in index.scan().records] == ["继续"]
+    write_thread_names(root, (CODEX_NATIVE, "first name"), (CODEX_PARENT, "other"),
+                       (CODEX_NATIVE, "retry the upload"))
+    assert [r.title for r in index.scan().records] == ["retry the upload"], "the last name wins"
+    assert [r.title for r in HistoryIndex([root], None).scan().records] == ["retry the upload"]
+    write_thread_names(root, (CODEX_NATIVE, ""))
+    assert [r.title for r in index.scan().records] == ["继续"], "an emptied name is cleared"
+
+
+def test_codex_thread_names_do_not_replace_a_real_request(tmp_path):
+    root, file = make_codex(tmp_path, [["fix the upload retry"]])
+    write_thread_names(root, (CODEX_NATIVE, "upload"))
+    assert [r.title for r in HistoryIndex([root]).scan().records] == ["fix the upload retry"]
+
+
+# Scripted sessions: started with no person at a prompt.
+
+@pytest.mark.parametrize("entrypoint,scripted", [("cli", False), ("sdk-cli", True),
+                                                 ("sdk-ts", True), ("claude-vscode", False)])
+def test_claude_scripted_sessions(tmp_path, entrypoint, scripted):
+    root, file = make_claude(tmp_path, [{**claude_user("run the checks"), "entrypoint": entrypoint}])
+    assert read_metadata(root, str(file))[0].scripted is scripted
+
+
+@pytest.mark.parametrize("meta,scripted", [
+    ({"originator": "codex_exec", "source": "exec"}, True),
+    ({"originator": "codex_exec", "source": {"subagent": {"other": "x"}}}, True),
+    ({"originator": "codex_sdk_ts", "source": "exec"}, True),
+    ({"originator": "codex-tui", "source": "cli"}, False),
+    ({"originator": "Codex Desktop", "source": "vscode"}, False),
+])
+def test_codex_scripted_sessions(tmp_path, meta, scripted):
+    root, file = make_codex(tmp_path, [["run the checks"]], meta)
+    assert read_metadata(root, str(file))[0].scripted is scripted
+
+
+def test_scripted_survives_the_cache_and_defaults_false(tmp_path):
+    root, file = make_codex(tmp_path, [["run"]], {"originator": "codex_exec", "source": "exec"})
+    cache = tmp_path / "cache.json"
+    HistoryIndex([root], cache).scan()
+    assert [r.scripted for r in HistoryIndex([root], cache).scan().records] == [True]
+    root, file = make_pi(tmp_path / "pi")
+    assert read_metadata(root, str(file))[0].scripted is False
