@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4 — 2026-09-30
 
 - `<task-notification>` (Claude Code telling the agent a background task finished)
   and `<local-command-stderr>` are injected context, not the person's request, so
