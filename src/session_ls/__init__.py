@@ -38,7 +38,8 @@ _INJECTED_PREFIXES = ("<recommended_plugins>", "<environment_details>", "<enviro
                       "<subagent_notification>", "<user_action>", "<in-app-browser-context",
                       "<external_codex_apps_", "<turn_aborted>", "<image ", "</image>",
                       "<local-command-caveat>", "<local-command-stdout>", "<command-name>",
-                      "<command-message>", "The following is the Codex agent history")
+                      "<command-message>", "The following is the Codex agent history",
+                      "<task-notification>", "<local-command-stderr>")
 
 # Some clients wrap the person's words together with context in one text part. The
 # words are recovered from the wrapper instead of losing the whole message:

@@ -23,7 +23,7 @@ from . import _claude_user, _codex_user, _cursor_user, _injected, _pi_user
 from .storage import atomic_json, file_lock, read_json
 
 API_VERSION = 1
-PARSER_VERSION = 5
+PARSER_VERSION = 6
 PATTERNS = {
     "claude": ("projects/*/*.jsonl",),
     "codex": ("sessions/*/*/*/rollout-*.jsonl", "archived_sessions/rollout-*.jsonl"),
