@@ -22,6 +22,8 @@ echoes) is skipped part by part, and wrapped requests are unwrapped: Codex deskt
 - **Fast.** Metadata is cached in `~/.cache/session_ls_cache.json`, keyed by
   file size + mtime; unchanged files are never re-read. Listing ~1000
   sessions takes milliseconds. Full-text search streams literal matches and decoded JSON Unicode text.
+  A long-lived `HistoryIndex` rescans only what changed: unchanged directories keep
+  their listings and unchanged files their records (every file is still `lstat`ed).
 - **Plain search, no semantics.** No index, no embeddings, no network.
   Matching is literal substring comparison. Decide what's relevant
   yourself - or hand the file paths to an LLM.
@@ -124,4 +126,12 @@ fields. Package imports do not change SIGPIPE. No TUI dependencies are required.
 `HistoryRecord.subagent` is true for a session another agent session started for
 itself (Codex `thread_spawn` workers and the guardian approval reviewer), and
 `HistoryRecord.parent` is the spawning session's native id when the child names it.
-Both default to "not a subagent".
+Both default to "not a subagent". `HistoryRecord.scripted` is true for a session
+started with no person at a prompt (`claude -p` or the Claude Agent SDK, `codex exec`
+or the Codex SDK; Pi records no such marker).
+
+In the API, a first message too short to say anything (at most 8 terminal columns
+once whitespace is collapsed: "hi", "pwd", "exit", or nothing) gives way to the
+session's own name when it has one: Claude's latest rename, else its generated
+title, else its agent name; Pi's session name; Codex's thread name from
+`session_index.jsonl`. The `session-ls` command keeps the first message.

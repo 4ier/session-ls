@@ -11,9 +11,10 @@ import json
 import os
 import shlex
 import stat
+import time
 import unicodedata
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,7 @@ from . import _claude_user, _codex_user, _cursor_user, _injected, _pi_user
 from .storage import atomic_json, file_lock, read_json
 
 API_VERSION = 1
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 PATTERNS = {
     "claude": ("projects/*/*.jsonl",),
     "codex": ("sessions/*/*/*/rollout-*.jsonl", "archived_sessions/rollout-*.jsonl"),
@@ -117,6 +118,10 @@ class HistoryRecord:
     # The person's most recent request, and the git branch the session last named.
     last_request: str = ""
     branch: str = ""
+    # Started without a person at a prompt: Claude run through its SDK or `claude -p`
+    # (an ``sdk-*`` entrypoint), Codex through `codex exec` or its SDK. Pi writes no
+    # such marker, so its sessions are never scripted.
+    scripted: bool = False
 
     @property
     def can_resume(self) -> bool:
@@ -207,6 +212,50 @@ def _codex_parent(payload: dict) -> tuple[bool, Optional[str]]:
 
 TAIL_BYTES = 2**19
 REQUEST_BYTES = 2**22
+THREAD_NAMES_BYTES = 2**24
+
+# A first message this short says nothing about the session ("hi", "pwd", "exit",
+# "继续"), so the agent's own title for the session is preferred when there is one.
+# Width is counted in terminal columns (a CJK character is two) after collapsing
+# whitespace; an empty message is always weak.
+WEAK_TITLE_WIDTH = 8
+
+
+def weak_title(text: Optional[str]) -> bool:
+    """Whether a first user message is too short to be a useful title."""
+    words = (text or "").split()
+    joined = " ".join(words)
+    if len(joined) > WEAK_TITLE_WIDTH:
+        return False
+    width = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in joined)
+    return width <= WEAK_TITLE_WIDTH
+
+
+CLAUDE_NAMES = {"custom-title": "customTitle", "ai-title": "aiTitle", "agent-name": "agentName"}
+
+
+def _native_name(agent: str, data: dict) -> Optional[tuple[str, Optional[str]]]:
+    """(kind, name) when a record names its session; a name of None clears it.
+
+    Claude writes ``custom-title`` when the person renames a session, ``ai-title``
+    when it titles one itself, and ``agent-name`` for a named agent, and appends them
+    again as the session goes on; Pi writes ``session_info`` when a session is named.
+    Codex keeps names outside the transcript (see ``HistoryIndex``).
+    """
+    kind = data.get("type")
+    if agent == "claude" and kind in CLAUDE_NAMES:
+        value = data.get(CLAUDE_NAMES[kind])
+    elif agent == "pi" and kind == "session_info":
+        value = data.get("name")
+    else:
+        return None
+    value = value.strip() if isinstance(value, str) and "\x00" not in value else ""
+    return kind, value or None
+
+
+# A name the person gave outranks a generated title; Claude's own session list shows
+# customTitle ?? aiTitle, and an agent's name is the last resort.
+NAME_KINDS = ("custom-title", "session_info", "ai-title", "agent-name")
 
 
 def _claude_activity(data: dict) -> str:
@@ -260,12 +309,13 @@ def _pi_activity(data: dict) -> str:
 ACTIVITY = {"claude": _claude_activity, "codex": _codex_activity, "pi": _pi_activity}
 
 
-def _tail(handle, agent: str, size: int) -> tuple[str, str, str]:
+def _tail(handle, agent: str, size: int, names: Optional[dict] = None) -> tuple[str, str, str]:
     """Activity, latest request and branch, from the last part of a transcript.
 
     Activity and branch are near the end. The latest request can be far behind it
     when an agent works alone for hours, so that search continues backwards, one
-    window at a time, up to REQUEST_BYTES.
+    window at a time, up to REQUEST_BYTES. Session names on the lines read are put
+    in ``names`` (the latest of each kind), when given.
     """
     if agent not in ACTIVITY:
         return "", "", ""
@@ -291,6 +341,10 @@ def _tail(handle, agent: str, size: int) -> tuple[str, str, str]:
                 continue
             if not isinstance(data, dict):
                 continue
+            if names is not None:
+                named = _native_name(agent, data)
+                if named and named[0] not in names:
+                    names[named[0]] = named[1]  # read backwards: the first seen is the latest
             if not activity:
                 activity = ACTIVITY[agent](data)
             if not branch and agent == "claude":
@@ -311,13 +365,15 @@ def _tail(handle, agent: str, size: int) -> tuple[str, str, str]:
 
 def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int = 2**21,
                   max_lines: int = 2000) -> tuple[HistoryRecord, list]:
-    native_id = cwd = started = title = native_title = parent = None
+    native_id = cwd = started = title = parent = None
+    names = {}
     head_branch = ""
-    subagent = saw_codex_meta = False
+    subagent = saw_codex_meta = scripted = False
+    entrypoint = None
     problems = []
     saw_metadata = False
     used = 0
-    exhausted = False
+    exhausted = identified = False
     with open_source(file, root.path) as handle:
         st = os.fstat(handle.fileno())
         signature = [API_VERSION, PARSER_VERSION, st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino]
@@ -328,12 +384,13 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                 break
             used += len(line)
             if used > max_bytes:
-                problems.append("Metadata byte budget reached")
+                if not identified:
+                    problems.append("Metadata byte budget reached")
                 break
             try:
                 data = json.loads(line)
             except (ValueError, UnicodeError, RecursionError):
-                if line.strip():
+                if line.strip() and not identified:
                     problems.append("Malformed or incomplete JSON line")
                 continue
             if not isinstance(data, dict):
@@ -355,6 +412,8 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                         # records; the file's own identity is the first one.
                         subagent, parent = _codex_parent(payload)
                         saw_codex_meta = True
+                        scripted = (payload.get("originator") == "codex_exec"
+                                    or payload.get("source") == "exec")
                         git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
                         head_branch = _text_field(git.get("branch")) or ""
             elif root.agent == "claude":
@@ -369,10 +428,13 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                     native_id = native_id or _text_field(data.get("sessionId"))
                     cwd = cwd or _text_field(data.get("cwd"))
                     started = started or _text_field(data.get("timestamp"))
-                if native_title is None and data.get("type") in ("ai-title", "agent-name"):
-                    native_title = _text_field(data.get("aiTitle") or data.get("agentName"))
+                    entrypoint = entrypoint or _text_field(data.get("entrypoint"))
+                    scripted = (entrypoint or "").startswith("sdk-")
             elif root.agent == "cursor" and data.get("role") in ("user", "assistant"):
                 saw_metadata = True
+            named = _native_name(root.agent, data)
+            if named:
+                names[named[0]] = named[1]  # read forwards: the last seen is the latest
             if not title:
                 try:
                     candidate = EXTRACTORS[root.agent](line.decode("utf-8", "replace"))
@@ -381,11 +443,16 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
                 except (ValueError, TypeError, AttributeError):
                     pass
             if title and (native_id and cwd or root.agent == "cursor"):
-                exhausted = True
-                break
-        if not exhausted and used <= max_bytes:
+                identified = True
+                # A weak first message is kept only if the session has no name of its
+                # own, so keep reading the head for one where transcripts carry names.
+                if root.agent not in ("claude", "pi") or not weak_title(title):
+                    exhausted = True
+                    break
+        if not exhausted and not identified and used <= max_bytes:
             problems.append("Metadata line budget reached")
-        activity, last_request, tail_branch = _tail(handle, root.agent, st.st_size)
+        tail_names = {}
+        activity, last_request, tail_branch = _tail(handle, root.agent, st.st_size, tail_names)
     if not saw_metadata:
         if not any("budget" in problem for problem in problems):
             raise ValueError("Unrecognized history format")
@@ -404,9 +471,13 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
         problems.append("Invalid native identifier")
     if not native_id:
         problems.append("Native identifier unavailable")
-    # A real user message outranks the native session title, which is only used
-    # when the session has no user text at all.
-    title = title or native_title
+    # The person's first message is the title, unless it is too short to say anything
+    # (weak_title) and the session has a name of its own: the latest one written,
+    # a name the person gave before one the agent generated.
+    names.update(tail_names)  # the tail was written later than the head
+    native = next((names[kind] for kind in NAME_KINDS if names.get(kind)), None)
+    if native and weak_title(title):
+        title = native
     if not title:
         problems.append("No user title within metadata budget")
     last = datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat()
@@ -414,7 +485,7 @@ def read_metadata(root: Root, file: str, host_id: str = "local", max_bytes: int 
         history_key(host_id, root.agent, root.path, native_id, file), root.agent,
         root.path, native_id, cwd or "", quality, _date(started, last), last,
         title or "", file, "partial" if problems else "available", tuple(dict.fromkeys(problems)),
-        subagent, parent, activity, last_request, tail_branch or head_branch
+        subagent, parent, activity, last_request, tail_branch or head_branch, scripted
     ), signature
 
 
@@ -467,6 +538,26 @@ def source_paths(root: Root, pattern: str, issues: list[str], cancel=None):
 
 
 class HistoryIndex:
+    """Session metadata for a set of roots, kept current by ``scan``.
+
+    Every scan returns what a scan from nothing would, but repeated scans in one
+    process are cheap: a directory whose identity, mtime and ctime are unchanged
+    has the same entries (creating, removing or renaming one changes both times),
+    so its listing is reused; and a file whose lstat is unchanged since it was
+    last opened keeps its record (an append changes size and times; chmod, chown
+    and replacement change ctime or the inode). Only what changed is opened.
+    """
+
+    # A listing is reused only once the directory has been unchanged this long, so a
+    # coarse filesystem clock cannot give a change made right after the listing the
+    # same timestamp as the listing it would then be hidden behind.
+    listing_settle_seconds = 2.0
+    # While sessions are written to, most scans change a few records. The cache file
+    # (megabytes for thousands of sessions) is then rewritten at most this often; the
+    # records in memory are always current, and a process that starts before the next
+    # write only re-reads the few files that changed.
+    persist_seconds = 60.0
+
     def __init__(self, roots: list[Root], cache_path: Optional[Path] = None,
                  host_id: str = "local", max_bytes: int = 2**21, max_lines: int = 2000):
         self.roots = roots
@@ -476,6 +567,119 @@ class HistoryIndex:
         self.max_lines = max_lines
         self._memory = {}
         self._cache_stat = None
+        self._listings = {}  # (directory, pattern component) -> (identity, names)
+        self._files = {}  # file -> (lstat identity, record, cache entry)
+        self._names = {}  # Codex root -> (index identity, {native id: thread name})
+        self._pending = False
+        self._saved_at = float("-inf")
+
+    def _paths(self, root: Root, pattern: str, issues: list[str], cancel, listings: dict):
+        """(directory fd, directory, name) for each path matching the pattern.
+
+        The same traversal and reports as ``source_paths``, with listings reused.
+        """
+        parts = pattern.split("/")
+        settled = time.time_ns() - int(self.listing_settle_seconds * 1e9)
+
+        def walk(fd, directory, depth):
+            if cancel is not None and cancel.is_set():
+                return
+            component = parts[depth]
+            try:
+                st = os.fstat(fd)
+                identity = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+                key = (directory, component)
+                known = self._listings.get(key)
+                if known is not None and known[0] == identity:
+                    names = known[1]
+                else:
+                    with os.scandir(fd) as entries:
+                        names = [entry.name for entry in entries
+                                 if fnmatch.fnmatchcase(entry.name, component)
+                                 and entry.name != "subagents"]
+                if max(st.st_mtime_ns, st.st_ctime_ns) < settled:
+                    listings[key] = (identity, names)
+                last = depth == len(parts) - 1
+                for name in names:
+                    path = directory + "/" + name
+                    if last:
+                        yield fd, path, name
+                        continue
+                    child = None
+                    try:
+                        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                        dir_fd=fd)
+                        yield from walk(child, path, depth + 1)
+                    except (FileNotFoundError, NotADirectoryError):
+                        continue  # see source_paths: never a place sessions live
+                    except OSError as exc:
+                        issues.append(f"{root.agent}: directory {clean_text(name)} unavailable ({type(exc).__name__})")
+                    finally:
+                        if child is not None:
+                            os.close(child)
+            except OSError as exc:
+                issues.append(f"{root.agent}: directory scan unavailable ({type(exc).__name__})")
+
+        try:
+            fd = os.open(root.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return
+        except NotADirectoryError:
+            issues.append(f"{root.agent}: configured root is not a directory")
+            return
+        try:
+            yield from walk(fd, root.path.rstrip("/"), 0)
+        finally:
+            os.close(fd)
+
+    def _thread_names(self, root: Root, issues: list[str], names: dict) -> dict:
+        """Codex thread names: ``session_index.jsonl``, one line per rename, last wins.
+
+        Codex keeps a session's name there (and in its state database), never in the
+        transcript. A name set to "" is cleared.
+        """
+        path = os.path.join(root.path, "session_index.jsonl")
+        known = self._names.get(root.path)
+        try:
+            if known is not None:
+                try:
+                    st = os.lstat(path)
+                    identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                except FileNotFoundError:
+                    identity = None
+                if known[0] == identity:
+                    names[root.path] = known
+                    return known[1]
+            with open_source(path, root.path) as handle:
+                st = os.fstat(handle.fileno())
+                identity = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                # Append-only: when it outgrows the budget, the latest lines are kept.
+                start = max(0, st.st_size - THREAD_NAMES_BYTES)
+                handle.seek(start)
+                lines = handle.read(THREAD_NAMES_BYTES).split(b"\n")
+                if start:
+                    lines = lines[1:]
+        except FileNotFoundError:
+            names[root.path] = (None, {})
+            return {}
+        except OSError as exc:
+            issues.append(f"{root.agent}: thread names unavailable ({type(exc).__name__})")
+            return {}
+        found = {}
+        for line in lines:
+            try:
+                data = json.loads(line)
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            if isinstance(data, dict) and _text_field(data.get("id")):
+                value = data.get("thread_name")
+                value = value.strip() if isinstance(value, str) and "\x00" not in value else ""
+                if value:
+                    found[data["id"]] = value
+                else:
+                    found.pop(data["id"], None)
+        names[root.path] = (identity, found)
+        return found
 
     def scan(self, cancel=None) -> ScanResult:
         result = ScanResult()
@@ -502,56 +706,57 @@ class HistoryIndex:
                 result.issues.append("Metadata cache unavailable; rebuilding without trusting it")
         updated = {}
         unique = {}
+        files, listings, names = {}, {}, {}
+        dirty = False
         for root in self.roots:
+            thread_names = self._thread_names(root, result.issues, names) if root.agent == "codex" else {}
             try:
                 for pattern in PATTERNS[root.agent]:
-                    for path in source_paths(root, pattern, result.issues, cancel):
+                    for fd, file, name in self._paths(root, pattern, result.issues, cancel, listings):
                         if cancel is not None and cancel.is_set():
                             result.cancelled = True
                             result.records = list(unique.values())
                             return result
-                        if "subagents" in path.relative_to(root.path).parts:
-                            continue
-                        file = str(path)
                         try:
-                            # Validate containment and inode even when cached metadata is reused.
-                            with open_source(file, root.path) as source:
-                                st = os.fstat(source.fileno())
-                            sig = [API_VERSION, PARSER_VERSION, st.st_size, st.st_mtime_ns,
-                                   st.st_dev, st.st_ino, self.host_id, self.max_bytes, self.max_lines]
-                            old = cache.get(file, {})
-                            record = None
-                            if isinstance(old, dict) and old.get("signature") == sig:
-                                try:
-                                    value = old["record"].copy()
-                                    value["problems"] = tuple(value.get("problems", ()))
-                                    candidate = HistoryRecord(**value)
-                                    if (candidate.file == file and candidate.root == root.path
-                                            and candidate.agent == root.agent
-                                            and candidate.key == history_key(self.host_id, root.agent,
-                                                root.path, candidate.native_id, file)
-                                            and all(isinstance(getattr(candidate, f), str) for f in
-                                                ("cwd", "cwd_quality", "title", "last", "started", "status"))):
-                                        record = candidate
-                                except (KeyError, TypeError, AttributeError, ValueError):
-                                    pass
-                            if record is None:
-                                record, parsed_sig = read_metadata(root, file, self.host_id,
-                                                                   self.max_bytes, self.max_lines)
-                                sig = parsed_sig + [self.host_id, self.max_bytes, self.max_lines]
-                            updated[file] = {"signature": sig, "record": asdict(record)}
+                            try:
+                                st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                                identity = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_dev,
+                                            st.st_ino, st.st_mode, st.st_uid)
+                            except OSError:
+                                identity = None
+                            known = self._files.get(file)
+                            if identity is not None and known is not None and known[0] == identity:
+                                # Unchanged since it was opened and parsed (or its cached
+                                # record validated) by an earlier scan.
+                                record, entry = known[1], known[2]
+                            else:
+                                record, entry, identity = self._load(root, file, cache)
+                            files[file] = (identity, record, entry)
+                            updated[file] = entry
+                            old = cache.get(file)
+                            if old is not entry and old != entry:
+                                dirty = True
+                            if record.agent == "codex" and record.native_id in thread_names \
+                                    and weak_title(record.title):
+                                record = replace(record, title=thread_names[record.native_id])
                             previous = unique.get(record.key)
                             if previous is None or record.last > previous.last:
                                 unique[record.key] = record
                         except (OSError, ValueError, TypeError) as exc:
                             # OSError text contains the private path; our own ValueError text does not.
                             detail = clean_text(str(exc))[:80] if isinstance(exc, (ValueError, TypeError)) else ""
-                            result.issues.append(f"{root.agent}: {clean_text(path.name)}: {type(exc).__name__}"
+                            result.issues.append(f"{root.agent}: {clean_text(name)}: {type(exc).__name__}"
                                                  + (f" ({detail})" if detail else ""))
             except OSError as exc:
                 result.issues.append(f"{root.agent} source unavailable: {type(exc).__name__}")
         result.records = sorted(unique.values(), key=lambda row: row.last, reverse=True)
-        if self.cache_path and (updated != cache or cache_failed):
+        self._files, self._listings, self._names = files, listings, names
+        if dirty or len(updated) != len(cache) or cache_failed:
+            self._pending = True
+        if self.cache_path and self._pending and (
+                cache_failed or time.monotonic() - self._saved_at >= self.persist_seconds):
+            self._pending = False
+            self._saved_at = time.monotonic()
             try:
                 with file_lock(self.cache_path.with_suffix(".lock")):
                     atomic_json(self.cache_path, {"schema": API_VERSION, "entries": updated})
@@ -565,6 +770,37 @@ class HistoryIndex:
             except OSError:
                 self._cache_stat = None
         return result
+
+    def _load(self, root: Root, file: str, cache: dict):
+        """(record, cache entry, lstat identity) for a file this process has not seen
+        unchanged: from the cache file when its signature still matches, else parsed."""
+        # Validate containment and inode even when cached metadata is reused.
+        with open_source(file, root.path) as source:
+            st = os.fstat(source.fileno())
+        identity = (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_dev, st.st_ino,
+                    st.st_mode, st.st_uid)
+        sig = [API_VERSION, PARSER_VERSION, st.st_size, st.st_mtime_ns,
+               st.st_dev, st.st_ino, self.host_id, self.max_bytes, self.max_lines]
+        old = cache.get(file, {})
+        if isinstance(old, dict) and old.get("signature") == sig:
+            try:
+                value = old["record"].copy()
+                value["problems"] = tuple(value.get("problems", ()))
+                candidate = HistoryRecord(**value)
+                if (candidate.file == file and candidate.root == root.path
+                        and candidate.agent == root.agent
+                        and candidate.key == history_key(self.host_id, root.agent,
+                            root.path, candidate.native_id, file)
+                        and all(isinstance(getattr(candidate, f), str) for f in
+                            ("cwd", "cwd_quality", "title", "last", "started", "status"))):
+                    return candidate, old, identity
+            except (KeyError, TypeError, AttributeError, ValueError):
+                pass
+        record, parsed_sig = read_metadata(root, file, self.host_id, self.max_bytes, self.max_lines)
+        sig = parsed_sig + [self.host_id, self.max_bytes, self.max_lines]
+        if sig[2:6] != [st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino]:
+            identity = None  # changed while it was read: parse it again next time
+        return record, {"signature": sig, "record": asdict(record)}, identity
 
 
 def matches_metadata(record: HistoryRecord, terms: list[str]) -> bool:
